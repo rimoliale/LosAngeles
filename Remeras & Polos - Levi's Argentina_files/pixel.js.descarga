@@ -1,0 +1,283 @@
+(function () {
+
+  // =========================
+  // A) UTM / Snowplow contexts (UNA VEZ)
+  // =========================
+  try {
+    if (!window.__UTM_CONTEXT_REGISTERED__) {
+      window.__UTM_CONTEXT_REGISTERED__ = true;
+
+      // ---- CONFIG ----
+      var STORAGE_KEYS = {
+        utm_source:  'ams_s',
+        utm_medium:  'ams_m',
+        utm_campaign:'ams_c',
+        utm_term:    'ams_t',
+        utm_content: 'ams_co',
+        ams_auction: 'ams_a',
+        gad_source:  'ams_gad',
+        fbclid:      'ams_fbclid',
+        ttclid:      'ams_ttclid'
+      };
+
+      var COOKIE_DAYS = 90;
+      var EXP_MS = COOKIE_DAYS * 24 * 60 * 60 * 1000;
+
+      // ---- HELPERS ----
+      function now(){ return Date.now(); }
+
+      function getCookie(name){
+        try{
+          var nameEQ = name + "=";
+          var ca = document.cookie.split(';');
+          for (var i=0;i<ca.length;i++){
+            var c = ca[i].trim();
+            if (c.indexOf(nameEQ) === 0) return decodeURIComponent(c.substring(nameEQ.length));
+          }
+        }catch(e){}
+        return null;
+      }
+
+      function getStored(shortKey){
+        // 1) sessionStorage
+        try{
+          var sv = sessionStorage.getItem(shortKey);
+          if (sv != null && sv !== 'null' && sv !== '') return sv;
+        }catch(e){}
+        // 2) localStorage (3 variantes: *_ts, {v,ts}, plano)
+        try{
+          var lv = localStorage.getItem(shortKey);
+          if (lv != null && lv !== 'null' && lv !== '') {
+            var tsStr = localStorage.getItem(shortKey + '_ts');
+            if (tsStr){
+              var ts = parseInt(tsStr,10);
+              if (!isNaN(ts) && (now() - ts) <= EXP_MS) return lv;
+              localStorage.removeItem(shortKey); localStorage.removeItem(shortKey+'_ts');
+            } else {
+              try{
+                var parsed = JSON.parse(lv);
+                if (parsed && typeof parsed === 'object' && 'v' in parsed){
+                  if (!parsed.ts || (now() - parsed.ts) <= EXP_MS) return String(parsed.v);
+                  localStorage.removeItem(shortKey);
+                } else {
+                  return lv;
+                }
+              }catch(_){
+                return lv;
+              }
+            }
+          }
+        }catch(e){}
+        // 3) cookie
+        var cv = getCookie(shortKey);
+        if (cv != null && cv !== 'null' && cv !== '') return cv;
+        return null;
+      }
+
+      function normalizeSource(val){
+        if (val == null) return null;
+        var trimmed = (''+val).trim();
+        if (!trimmed) return null;
+        if (/^\d+$/.test(trimmed)) return null;
+        return trimmed;
+      }
+
+      function resolveUtmSource(){
+        var us = normalizeSource(getStored(STORAGE_KEYS.utm_source));
+        if (us) return us;
+
+        var gad = normalizeSource(getStored(STORAGE_KEYS.gad_source));
+        if (gad) return gad;
+
+        var fb  = getStored(STORAGE_KEYS.fbclid);
+        if (fb) return 'facebook';
+
+        var tt  = getStored(STORAGE_KEYS.ttclid);
+        if (tt) return 'tiktok';
+
+        return null;
+      }
+
+      function buildUtmContext(){
+        var ctx = {
+          schema: 'iglu:com.admedia/marketing_utm/jsonschema/1-0-1',
+          data: {
+            utm_source:  resolveUtmSource(),
+            utm_medium:  getStored(STORAGE_KEYS.utm_medium)   || null,
+            utm_campaign:getStored(STORAGE_KEYS.utm_campaign) || null,
+            utm_term:    getStored(STORAGE_KEYS.utm_term)     || null,
+            utm_content: getStored(STORAGE_KEYS.utm_content)  || null,
+            auction_id:  getStored(STORAGE_KEYS.ams_auction)  || null
+          }
+        };
+
+        var d = ctx.data;
+        var allNull = (d.utm_source==null && d.utm_medium==null && d.utm_campaign==null && d.utm_term==null && d.utm_content==null && d.auction_id==null);
+        return allNull ? null : ctx;
+      }
+
+      function register(){
+        if (!window.snowplow) return false;
+        var ctx = buildUtmContext();
+        if (ctx) window.snowplow('addGlobalContexts', [ctx]);
+        return true;
+      }
+
+      if (!register()){
+        var it = setInterval(function(){
+          if (register()) clearInterval(it);
+        }, 100);
+      }
+    }
+  } catch(_) {}
+
+  // =========================
+  // B) DoubleClick (CADA EJECUCIÓN, CON THROTTLE)
+  // =========================
+
+  // Throttle por sesión: máximo 1 cada 30 segundos (ajustable)
+  function dcThrottleOk(minMs){
+    try {
+      var k = "ams_dc_last_ms";
+      var last = parseInt(sessionStorage.getItem(k) || "0", 10);
+      var t = Date.now();
+      if (t - last < minMs) return false;
+      sessionStorage.setItem(k, String(t));
+    } catch(_) {}
+    return true;
+  }
+
+  // Se puede aplicar otro valor
+  var DC_MIN_MS = 5000;
+
+  if (!dcThrottleOk(DC_MIN_MS)) return;
+
+  //  Inserción segura en <body> 
+  function safeAppend(el) {
+    try {
+      if (document.body) {
+        document.body.appendChild(el);
+        return true;
+      }
+      var once = function () {
+        try {
+          document.removeEventListener('DOMContentLoaded', once);
+          if (document.body) document.body.appendChild(el);
+        } catch(_) {}
+      };
+      document.addEventListener('DOMContentLoaded', once);
+      return false;
+    } catch(_) { return false; }
+  }
+
+// ---------- BRIDGE IFRAME ----------
+function agregarSPviaIframe(googleUrl){
+  try{
+    var cid = getCIDFromHM(); // ← derivado desde hm (base64 → texto)
+
+    var BRIDGE_ORIGIN = "https://pixel.servicesadmedia.com";
+    var ifr = document.createElement('iframe');
+    ifr.style.display = "none";
+    ifr.width = 0;
+    ifr.height = 0;
+    ifr.loading = "eager";
+
+    // armamos URL del bridge
+    var src = BRIDGE_ORIGIN + "/pixel_CM_bridge.html?u=" + encodeURIComponent(googleUrl);
+
+    // agregamos cid si existe
+    if (cid) {
+      src += "&cid=" + encodeURIComponent(cid);
+    }
+
+    ifr.src = src;
+    document.documentElement.appendChild(ifr);
+
+    // limpieza automática
+    setTimeout(function(){
+      try{ ifr.remove(); }catch(e){}
+    }, 3000);
+
+    // listener opcional
+    window.addEventListener("message", function onMsg(ev){
+      try{
+        if (ev.origin !== BRIDGE_ORIGIN) return;
+        if (!ev.data || ev.data.type !== "dc-fired") return;
+        window.removeEventListener("message", onMsg);
+      }catch(_){}
+    });
+
+  }catch(e){}
+}
+
+  function getHM(){
+    try {
+      var hm = sessionStorage.getItem("ams_hm");
+      if (hm) return hm;
+      var raw = localStorage.getItem("ams_hm");
+      if (raw){
+        try { var p = JSON.parse(raw); if (p && p.v) return p.v; } catch(_){}
+      }
+    } catch(_){}
+    return null;
+  }
+
+  // --- Lógica de disparo ----
+  try {
+    var tries = 3;
+
+    function fire(){
+      var hm = getHM();
+      var googleUrl = hm
+        ? "https://cm.g.doubleclick.net/pixel?google_nid=admedia_3&google_hm=" + encodeURIComponent(hm) + "&google_cm"
+        : "https://cm.g.doubleclick.net/pixel?google_nid=admedia_3&google_cm";
+      agregarSPviaIframe(googleUrl);
+    }
+
+    var hmNow = getHM();
+    if (hmNow || tries <= 0) {
+      fire();
+    } else {
+      var t = setInterval(function(){
+        tries--;
+        if (getHM() || tries <= 0){
+          clearInterval(t);
+          fire();
+        }
+      }, 150);
+    }
+  } catch(e){ /* no-op */ }
+
+
+function getCIDFromHM(){
+  try {
+    var hm = null;
+
+    // 1) sessionStorage
+    hm = sessionStorage.getItem("ams_hm");
+    if (!hm) {
+      // 2) localStorage (json)
+      var raw = localStorage.getItem("ams_hm");
+      if (raw) {
+        try {
+          var p = JSON.parse(raw);
+          if (p && p.v) hm = p.v;
+        } catch(_) {}
+      }
+    }
+
+    if (!hm) return null;
+
+    // hm viene base64 → decodificamos
+    var cid = atob(hm);
+
+    // sanity check mínimo
+    cid = (cid || "").trim();
+    if (!cid) return null;
+
+    return cid;
+  } catch(e){
+    return null;
+  }
+}
+})();

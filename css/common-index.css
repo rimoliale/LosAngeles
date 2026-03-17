@@ -1,0 +1,26 @@
+
+
+
+@font-face {
+  font-family: 'CaliforniaByDirt2';
+  src: url('../fonts/California by Dirt2.ttf') format('woff2'),
+       url('../fonts/California by Dirt2.ttf') format('woff');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+
+@media (min-width: 768px) {
+.bg-base{
+    background-color: #f4c183;
+}
+    
+.nombre-principal{
+    font-size: 15vh;
+    text-align: center;
+    font-family: CaliforniaByDirt2;
+}
+
+
+}

@@ -1,0 +1,164 @@
+(function () {
+  // ---- CONFIG ----
+  const PRIMARY_KEYS = ['utm_source', 'gad_source', 'fbclid', 'ttclid']; // last click
+  const UTM_KEYS = ['utm_medium', 'utm_campaign', 'utm_term', 'utm_content'];
+  const EXTRA_KEYS = ['ams_auction']; // auction_id (se mapea a ams_a)
+  const ALL_KEYS = PRIMARY_KEYS.concat(UTM_KEYS, EXTRA_KEYS);
+
+  const STORAGE_KEYS = {
+    utm_source:  'ams_s',
+    utm_medium:  'ams_m',
+    utm_campaign:'ams_c',
+    utm_term:    'ams_t',
+    utm_content: 'ams_co',
+    gad_source:  'ams_gad',
+    fbclid:      'ams_fbclid',
+    ttclid:      'ams_ttclid',
+    ams_auction: 'ams_a'   // -> auction_id
+  };
+
+  const COOKIE_DAYS = 90;
+  const EXP_MS = COOKIE_DAYS * 24 * 60 * 60 * 1000;
+
+  // ---- UTIL ----
+  function now(){ return Date.now(); }
+
+  function setCookie(k, v, days){
+    try{
+      const d = new Date(); d.setTime(d.getTime() + days*86400000);
+      document.cookie = `${k}=${encodeURIComponent(v)}; expires=${d.toUTCString()}; path=/; SameSite=Lax;`;
+    }catch(e){}
+  }
+  function getCookie(k){
+    try{
+      const name = k + "=";
+      const parts = document.cookie.split(';');
+      for (let c of parts){ c = c.trim(); if(c.indexOf(name)===0) return decodeURIComponent(c.substring(name.length)); }
+    }catch(e){}
+    return null;
+  }
+
+  // Guardamos valor PLANO y un TS auxiliar para la expiración en localStorage
+  function setLS(k, v){
+    try{
+      localStorage.setItem(k, v);
+      localStorage.setItem(k+'_ts', String(now()));
+    }catch(e){}
+  }
+  function getLS(k){
+    try{
+      const v = localStorage.getItem(k);
+      if (!v) return null;
+      const ts = parseInt(localStorage.getItem(k+'_ts')||'0',10);
+      if (!ts || (now()-ts)>EXP_MS){
+        localStorage.removeItem(k);
+        localStorage.removeItem(k+'_ts');
+        return null;
+      }
+      return v;
+    }catch(e){ return null; }
+  }
+
+  function setSS(k, v){ try{ sessionStorage.setItem(k, v); }catch(e){} }
+  function getSS(k){ try{ return sessionStorage.getItem(k); }catch(e){ return null; } }
+
+  function removeEverywhere(shortKey){
+    // cookie
+    document.cookie = `${shortKey}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;`;
+    // localStorage
+    try{
+      localStorage.removeItem(shortKey);
+      localStorage.removeItem(shortKey+'_ts');
+    }catch(e){}
+    // sessionStorage
+    try{ sessionStorage.removeItem(shortKey); }catch(e){}
+  }
+
+  function getStored(k){
+    const sk = STORAGE_KEYS[k];
+    return getSS(sk) || getLS(sk) || getCookie(sk);
+  }
+
+  function storedPrimaryKeyAndValue(){
+    for(const k of PRIMARY_KEYS){
+      const sk = STORAGE_KEYS[k];
+      const v = getSS(sk) || getLS(sk) || getCookie(sk);
+      if(v) return {key:k, value:v};
+    }
+    return {key:null, value:null};
+  }
+
+  // ---- CORE: last click + reset selectivo en cambio de fuente ----
+  function handleStorage(){
+    const qp = new URLSearchParams(window.location.search);
+
+    // detectar nueva fuente primaria presente en la URL
+    let newPrimary = null, newPrimaryVal = null;
+    for(const k of PRIMARY_KEYS){
+      const val = qp.get(k);
+      if(val){ newPrimary = k; newPrimaryVal = val; break; }
+    }
+
+    const existing = storedPrimaryKeyAndValue(); // {key, value}
+
+    // Cambio de fuente: set de lo que viene y borrado de lo que no viene (para TODAS las keys)
+    if(newPrimary && (newPrimary !== existing.key || newPrimaryVal !== existing.value)){
+      for(const k of ALL_KEYS){
+        const sk = STORAGE_KEYS[k];
+        const val = qp.get(k);
+
+        if(val !== null && val !== undefined && val !== ''){
+          setCookie(sk, val, COOKIE_DAYS);
+          setLS(sk, val);
+          setSS(sk, val);
+        } else {
+          // si no vino en la URL, se elimina (queda "null" lógico")
+          removeEverywhere(sk);
+        }
+      }
+      return;
+    }
+
+    // Misma fuente: actualizar solo parámetros presentes en la URL (no tocar los demás)
+    for(const k of ALL_KEYS){
+      const val = qp.get(k);
+      if(val !== null && val !== undefined && val !== ''){
+        const sk = STORAGE_KEYS[k];
+        setCookie(sk, val, COOKIE_DAYS);
+        setLS(sk, val);
+        setSS(sk, val);
+      }
+    }
+  }
+
+  // ---- Run (solo persistencia) ----
+  if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    handleStorage();
+  } else {
+    document.addEventListener('DOMContentLoaded', handleStorage);
+  }
+
+  // BRIDGE param hm → lo dejamos igual, para uso de pixel.js
+  try {
+    var scripts = document.getElementsByTagName('script');
+    var hm = null;
+    for (var i=0; i<scripts.length; i++){
+      var s = scripts[i].src || "";
+      if (s && s.indexOf("/storage.js") !== -1) {
+        var q = s.split("?")[1] || "";
+        if (q) {
+          var params = new URLSearchParams(q);
+          hm = params.get("hm");
+          if (hm) break;
+        }
+      }
+    }
+    if (hm) {
+      try { sessionStorage.setItem("ams_hm", hm); } catch(e){}
+      try { localStorage.setItem("ams_hm", JSON.stringify({ v: hm, ts: Date.now() })); } catch(e){}
+    }
+  } catch(e){ /* no-op */ }
+
+  // Export helpers si los necesitás externamente
+  window.__ams_get = getStored;
+})();
